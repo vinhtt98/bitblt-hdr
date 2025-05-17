@@ -10,6 +10,9 @@
     <Filter Include="deps\minhook">
       <UniqueIdentifier>{96f00120-184b-45af-939b-31f890f0aa05}</UniqueIdentifier>
     </Filter>
+    <Filter Include="shaders">
+      <UniqueIdentifier>{07afbb9f-cbe0-4b61-90ee-7b7ed578bc3e}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <None Include="dllproxy\version.def">
@@ -67,5 +70,14 @@
     <ClInclude Include="deps\minhook\src\trampoline.h">
       <Filter>deps\minhook</Filter>
     </ClInclude>
+    <ClInclude Include="resource.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="resource.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <FxCompile Include="tonemapper.hlsl">
+      <Filter>shaders</Filter>
+    </FxCompile>
   </ItemGroup>
 </Project>

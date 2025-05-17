@@ -10,45 +10,74 @@
 
 #include <MinHook.h>
 
+#include "resource.h"
+
+#ifndef _DEBUG
+#define printf(...) ((void) 0)
+#endif
+
 namespace
 {
 	ID3D11Device* device = nullptr;
 	ID3D11DeviceContext* ctx = nullptr;
 	IDXGIOutputDuplication* dup = nullptr;
 	ID3D11ComputeShader* tonemap_cs = nullptr;
+	IDXGIOutput6* target_output = nullptr;
+
+	HINSTANCE self_instance;
 
 	auto tonemap_cs_src = R"(
-Texture2D<float4> src: register(t0);
-RWTexture2D<float4> dest: register(u0);
+Texture2D<float4> src : register(t0);
+RWTexture2D<float4> dest : register(u0);
 
-// ACES Filmic tonemapping (approximation)
-float3 TonemapACES(float3 x)
+float3 soft_clip(float3 x)
 {
-    const float a = 2.51;
-    const float b = 0.03;
-    const float c = 2.43;
-    const float d = 0.59;
-    const float e = 0.14;
-    return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
+    return (1.0 + x - sqrt(1.0 - 1.99 * x + x * x)) / (1.995);
+}
+
+float3 aces_tonemap(float3 color)
+{
+    static const float3x3 m1 = {
+        0.59719, 0.07600, 0.02840,
+        0.35458, 0.90834, 0.13383,
+        0.04823, 0.01566, 0.83777
+    };
+
+    static const float3x3 m2 = {
+        1.60475, -0.10208, -0.00327,
+        -0.53108, 1.10813, -0.07276,
+        -0.07367, -0.00605, 1.07602
+    };
+
+    float3 v = mul(color, m1);
+
+    float3 a = v * (v + 0.0245786) - 0.000090537;
+    float3 b = v * (0.983729 * v + 0.4329510) + 0.238081;
+
+    return mul(a / b, m2);
 }
 
 [numthreads(16, 16, 1)]
-void main(uint3 tid: SV_DispatchThreadID )
+void main(uint3 tid: SV_DispatchThreadID)
 {
-	uint width, height;
+    uint width, height;
     src.GetDimensions(width, height);
 
-	if (tid.x >= width || tid.y >= height)
+    if (tid.x >= width || tid.y >= height)
     {
-		return;
-	}
-	
-	float4 inputColor = src[tid.xy];
+        return;
+    }
 
-	float3 linearColor = pow(inputColor.rgb, 0.4545);
-	linearColor = TonemapACES(linearColor);
+    float3 input_color = clamp(src[tid.xy].rgb, 0, 10000);
 
-	dest[tid.xy] = float4(pow(linearColor, 2.2), 1.0);
+    float3 linear_color = pow(input_color, 0.4545);
+    linear_color = linear_color * 2;
+    linear_color = aces_tonemap(linear_color);
+    linear_color = soft_clip(linear_color);
+
+    float3 out_color = pow(linear_color, 2.2);
+
+    dest[tid.xy] = float4(out_color, 1.0);
 }
 )";
 
@@ -62,11 +91,14 @@ void main(uint3 tid: SV_DispatchThreadID )
 		IDXGIFactory6* factory;
 		hr = CreateDXGIFactory1(__uuidof(IDXGIFactory6), reinterpret_cast<void**>(&factory));
 
-		if (FAILED(hr)) return false;
+		if (FAILED(hr))
+		{
+			printf("init_desktop_dup failed at line %d, hr = 0x%x\n", __LINE__, hr);
+			return false;
+		}
 
 		auto adapter_index = 0u;
 		IDXGIAdapter1* target_adapter = nullptr;
-		IDXGIOutput6* target_output = nullptr;
 		while (!target_adapter)
 		{
 			IDXGIAdapter4* adapter;
@@ -74,6 +106,8 @@ void main(uint3 tid: SV_DispatchThreadID )
 
 			if (FAILED(hr))
 			{
+				printf("init_desktop_dup failed at line %d, hr = 0x%x\n", __LINE__, hr);
+
 				factory->Release();
 				return false;
 			}
@@ -86,6 +120,8 @@ void main(uint3 tid: SV_DispatchThreadID )
 
 				if (FAILED(hr))
 				{
+					printf("init_desktop_dup failed at line %d, hr = 0x%x\n", __LINE__, hr);
+
 					adapter->Release();
 					factory->Release();
 					return false;
@@ -96,13 +132,15 @@ void main(uint3 tid: SV_DispatchThreadID )
 
 				if (FAILED(hr))
 				{
+					printf("init_desktop_dup failed at line %d, hr = 0x%x\n", __LINE__, hr);
+
 					output->Release();
 					adapter->Release();
 					factory->Release();
 					return false;
 				}
 
-				if (desc.AttachedToDesktop || desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
+				if (desc.AttachedToDesktop)
 				{
 					target_adapter = adapter;
 					target_output = output;
@@ -121,13 +159,20 @@ void main(uint3 tid: SV_DispatchThreadID )
 		D3D_FEATURE_LEVEL feature_level;
 
 		hr = D3D11CreateDevice(
-			target_adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_DEBUG,
+			target_adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+#ifdef _DEBUG
+			D3D11_CREATE_DEVICE_DEBUG,
+#else
+			0,
+#endif
 			nullptr, 0, D3D11_SDK_VERSION,
 			&device, &feature_level, &ctx
 		);
 
 		if (FAILED(hr))
 		{
+			printf("init_desktop_dup failed at line %d, hr = 0x%x\n", __LINE__, hr);
+
 			target_output->Release();
 			target_adapter->Release();
 			return false;
@@ -135,6 +180,8 @@ void main(uint3 tid: SV_DispatchThreadID )
 
 		if (device->GetFeatureLevel() < D3D_FEATURE_LEVEL_11_0)
 		{
+			printf("init_desktop_dup failed at line %d, feature level < 11.0\n", __LINE__, hr);
+
 			device->Release();
 			device = nullptr;
 			target_output->Release();
@@ -147,29 +194,43 @@ void main(uint3 tid: SV_DispatchThreadID )
 
 		if (FAILED(hr))
 		{
+			printf("init_desktop_dup failed at line %d, hr = 0x%x\n", __LINE__, hr);
+
 			ctx->Release();
 			device->Release();
-			
+
 			ctx = nullptr;
 			device = nullptr;
-			
+
 			target_output->Release();
 			target_adapter->Release();
 
 			return false;
 		}
 
-		target_output->Release();
 		target_adapter->Release();
+		return true;
+	}
 
+	void compile_tonemapper_cs()
+	{
+		if (tonemap_cs)
+		{
+#if _DEBUG
+			tonemap_cs->Release();
+#else
+			return;
+#endif
+		}
+
+#if _DEBUG
 		// compile tonemapping compute shader
 		ID3DBlob* shader = nullptr;
 		ID3DBlob* error = nullptr;
 
-		hr = D3DCompile(
-			tonemap_cs_src, strlen(tonemap_cs_src),
-			nullptr, nullptr,
-			D3D_COMPILE_STANDARD_FILE_INCLUDE,
+		HRESULT hr = D3DCompileFromFile(
+			L"tonemapper.hlsl",
+			nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
 			"main", "cs_5_0",
 			D3DCOMPILE_ENABLE_STRICTNESS, 0,
 			&shader, &error
@@ -177,28 +238,21 @@ void main(uint3 tid: SV_DispatchThreadID )
 
 		if (error)
 		{
-			OutputDebugStringA((char*)error->GetBufferPointer());
+			printf("compile_tonemapper_cs shader compile error: %s\n", error->GetBufferPointer());
 			error->Release();
 		}
 
 		if (FAILED(hr))
 		{
+			printf("compile_tonemapper_cs failed at line %d, hr = 0x%x\n", __LINE__, hr);
+
 			if (shader)
 				shader->Release();
 
-			dup->Release();
-			ctx->Release();
-			device->Release();
-
-			dup = nullptr;
-			ctx = nullptr;
-			device = nullptr;
-			
-			
-			return false;
+			return;
 		}
 
-		device->CreateComputeShader(
+		hr = device->CreateComputeShader(
 			shader->GetBufferPointer(), shader->GetBufferSize(),
 			nullptr, &tonemap_cs
 		);
@@ -207,14 +261,38 @@ void main(uint3 tid: SV_DispatchThreadID )
 
 		if (FAILED(hr))
 		{
-			device->Release();
-			ctx->Release();
-			device = nullptr;
-			ctx = nullptr;
-			return false;
+			printf("compile_tonemapper_cs failed at line %d, hr = 0x%x\n", __LINE__, hr);
+		}
+#else
+		auto* const res = FindResourceA(self_instance, MAKEINTRESOURCE(TONEMAPPER_SHADER), RT_RCDATA);
+		if (!res)
+		{
+			printf("compile_tonemapper_cs resource not found\n");
+			return;
 		}
 
-		return true;
+		auto* const handle = LoadResource(self_instance, res);
+		if (!handle)
+		{
+			printf("compile_tonemapper_cs failed to load resource\n");
+			return;
+		}
+
+		const auto* bytecode = LockResource(handle);
+		const auto size = SizeofResource(self_instance, res);
+
+		HRESULT hr = device->CreateComputeShader(
+			bytecode, size,
+			nullptr, &tonemap_cs
+		);
+
+		FreeResource(handle);
+		
+		if (FAILED(hr))
+		{
+			printf("compile_tonemapper_cs failed at line %d, hr = 0x%x\n", __LINE__, hr);
+		}
+#endif
 	}
 
 	void free_desktop_dup()
@@ -241,6 +319,12 @@ void main(uint3 tid: SV_DispatchThreadID )
 		{
 			device->Release();
 			device = nullptr;
+		}
+
+		if (target_output)
+		{
+			target_output->Release();
+			target_output = nullptr;
 		}
 	}
 
@@ -310,13 +394,23 @@ void main(uint3 tid: SV_DispatchThreadID )
 
 	void capture_frame(std::vector<uint8_t>& buffer, int& width, int& height)
 	{
-		DXGI_OUTDUPL_FRAME_INFO frameInfo;
+		compile_tonemapper_cs();
+
+		DXGI_OUTDUPL_FRAME_INFO frame_info{ 0 };
 		IDXGIResource* resource = nullptr;
 
-		Sleep(20);
-		HRESULT hr = dup->AcquireNextFrame(0, &frameInfo, &resource);
+		HRESULT hr = S_OK;
 
-		if (FAILED(hr)) return;
+		while (!frame_info.LastPresentTime.QuadPart)
+		{
+			Sleep(0);
+			dup->AcquireNextFrame(0, &frame_info, &resource);
+
+			if (FAILED(hr)) return;
+
+			if (!frame_info.LastPresentTime.QuadPart)
+				dup->ReleaseFrame();
+		}
 
 		ID3D11Texture2D* tex = nullptr;
 		hr = resource->QueryInterface(IID_PPV_ARGS(&tex));
@@ -370,9 +464,17 @@ void main(uint3 tid: SV_DispatchThreadID )
 	void* BitBlt_Original = nullptr;
 	BOOL WINAPI BitBltHook(HDC hdc, int x, int y, int cx, int cy, HDC hdcSrc, int x1, int y1, DWORD rop)
 	{
-		bool inited = init_desktop_dup();
+		printf("bitblt called\n");
+
+		static bool inited = init_desktop_dup();
 
 		if (!inited || (rop & CAPTUREBLT) == 0)
+			return reinterpret_cast<decltype(BitBlt)*>(BitBlt_Original)(hdc, x, y, cx, cy, hdcSrc, x1, y1, rop);
+
+		DXGI_OUTPUT_DESC1 desc;
+		target_output->GetDesc1(&desc);
+
+		if (desc.ColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
 			return reinterpret_cast<decltype(BitBlt)*>(BitBlt_Original)(hdc, x, y, cx, cy, hdcSrc, x1, y1, rop);
 
 		std::vector<uint8_t> buffer;
@@ -383,7 +485,7 @@ void main(uint3 tid: SV_DispatchThreadID )
 		HDC src = CreateCompatibleDC(hdc);
 		SelectObject(src, map);
 
-		auto result = reinterpret_cast<decltype(BitBlt)*>(BitBlt_Original)(hdc, x, y, cx, cy, src, x1, y1, SRCCOPY);
+		auto result = reinterpret_cast<decltype(BitBlt)*>(BitBlt_Original)(hdc, x, y, cx, cy, src, x1, y1, rop & ~CAPTUREBLT);
 
 		DeleteDC(src);
 		DeleteObject(map);
@@ -391,11 +493,27 @@ void main(uint3 tid: SV_DispatchThreadID )
 		return result;
 	}
 
+#if _DEBUG
+	void create_console()
+	{
+		AllocConsole();
+
+		FILE* f;
+		auto _ = freopen_s(&f, "CONOUT$", "w+t", stdout);
+		_ = freopen_s(&f, "CONOUT$", "w", stderr);
+		_ = freopen_s(&f, "CONIN$", "r", stdin);
+	}
+#endif
+
 	class hook_autoinit
 	{
 	public:
 		hook_autoinit()
 		{
+#if _DEBUG
+			create_console();
+#endif
+
 			LoadLibraryA("gdi32.dll");
 			MH_Initialize();
 			MH_CreateHookApi(L"gdi32.dll", "BitBlt", BitBltHook, &BitBlt_Original);
@@ -407,4 +525,14 @@ void main(uint3 tid: SV_DispatchThreadID )
 			free_desktop_dup();
 		}
 	} hook;
+}
+
+BOOL WINAPI DllMain(HINSTANCE instance, DWORD fdwReason, LPVOID)
+{
+	if (fdwReason == DLL_PROCESS_ATTACH)
+	{
+		self_instance = instance;
+	}
+
+	return TRUE;
 }
