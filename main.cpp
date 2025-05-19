@@ -25,6 +25,14 @@ namespace
 	ID3D11ComputeShader* tonemap_cs = nullptr;
 	IDXGIOutput6* target_output = nullptr;
 
+	struct tonemap_constant_buffer_t
+	{
+		float white_level = 200.0f;
+		float reserved[3];
+	} tonemap_cb_data;
+
+	ID3D11Buffer* tonemap_const_buffer = nullptr;
+
 	HINSTANCE self_instance;
 
 	bool recreate_desktop_duplication_api()
@@ -47,6 +55,81 @@ namespace
 		}
 
 		return true;
+	}
+
+	// https://chromium.googlesource.com/chromium/src/+/c71f15ab1ace78c7efeeeda9f8552b4af9db2877/ui/display/win/screen_win.cc#112
+	bool get_path_info(HMONITOR monitor, DISPLAYCONFIG_PATH_INFO* path_info)
+	{
+		LONG result;
+		uint32_t num_path_array_elements = 0;
+		uint32_t num_mode_info_array_elements = 0;
+		std::vector<DISPLAYCONFIG_PATH_INFO> path_infos;
+		std::vector<DISPLAYCONFIG_MODE_INFO> mode_infos;
+
+		// Get the monitor name.
+		MONITORINFOEXW view_info;
+		view_info.cbSize = sizeof(view_info);
+
+		if (!GetMonitorInfoW(monitor, &view_info))
+			return false;
+
+		// Get all path infos.
+		do
+		{
+			if (GetDisplayConfigBufferSizes(
+				QDC_ONLY_ACTIVE_PATHS, &num_path_array_elements,
+				&num_mode_info_array_elements) != ERROR_SUCCESS)
+			{
+				return false;
+			}
+			path_infos.resize(num_path_array_elements);
+			mode_infos.resize(num_mode_info_array_elements);
+			result = QueryDisplayConfig(
+				QDC_ONLY_ACTIVE_PATHS, &num_path_array_elements, path_infos.data(),
+				&num_mode_info_array_elements, mode_infos.data(), nullptr);
+		} while (result == ERROR_INSUFFICIENT_BUFFER);
+
+		// Iterate of the path infos and see if we find one with a matching name.
+		if (result == ERROR_SUCCESS)
+		{
+			for (uint32_t p = 0; p < num_path_array_elements; p++)
+			{
+				DISPLAYCONFIG_SOURCE_DEVICE_NAME device_name;
+				device_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+				device_name.header.size = sizeof(device_name);
+				device_name.header.adapterId = path_infos[p].sourceInfo.adapterId;
+				device_name.header.id = path_infos[p].sourceInfo.id;
+				if (DisplayConfigGetDeviceInfo(&device_name.header) == ERROR_SUCCESS)
+				{
+					if (wcscmp(view_info.szDevice, device_name.viewGdiDeviceName) == 0)
+					{
+						*path_info = path_infos[p];
+						return true;
+					}
+				}
+			}
+		}
+
+		return false;
+	}
+
+	float get_sdr_white_level(HMONITOR monitor)
+	{
+		const float default_white_level = 200.0f;
+
+		DISPLAYCONFIG_PATH_INFO path_info = {};
+		if (!get_path_info(monitor, &path_info))
+			return default_white_level; // default
+
+		DISPLAYCONFIG_SDR_WHITE_LEVEL white_level = {};
+		white_level.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
+		white_level.header.size = sizeof(white_level);
+		white_level.header.adapterId = path_info.targetInfo.adapterId;
+		white_level.header.id = path_info.targetInfo.id;
+		if (DisplayConfigGetDeviceInfo(&white_level.header) != ERROR_SUCCESS)
+			return default_white_level;
+
+		return white_level.SDRWhiteLevel * 80.0f / 1000.0f;
 	}
 
 	bool init_desktop_dup()
@@ -148,7 +231,7 @@ namespace
 
 		if (device->GetFeatureLevel() < D3D_FEATURE_LEVEL_11_0)
 		{
-			printf("init_desktop_dup failed at line %d, feature level < 11.0\n", __LINE__, hr);
+			printf("init_desktop_dup failed at line %d, feature level < 11.0\n", __LINE__);
 
 			device->Release();
 			device = nullptr;
@@ -158,6 +241,7 @@ namespace
 		}
 
 		target_adapter->Release();
+
 		return true;
 	}
 
@@ -188,7 +272,7 @@ namespace
 
 		if (error)
 		{
-			printf("compile_tonemapper_cs shader compile: %s\n", reinterpret_cast<const char *>(error->GetBufferPointer()));
+			printf("compile_tonemapper_cs shader compile: %s\n", reinterpret_cast<const char*>(error->GetBufferPointer()));
 			error->Release();
 		}
 
@@ -328,20 +412,49 @@ namespace
 			return nullptr;
 		}
 
+		if (!tonemap_const_buffer)
+		{
+			D3D11_BUFFER_DESC cb_desc;
+			cb_desc.ByteWidth = sizeof(tonemap_constant_buffer_t);
+			cb_desc.Usage = D3D11_USAGE_DYNAMIC;
+			cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+			cb_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+			cb_desc.MiscFlags = 0;
+			cb_desc.StructureByteStride = 0;
+
+			hr = device->CreateBuffer(&cb_desc, nullptr, &tonemap_const_buffer);
+
+			if (FAILED(hr))
+			{
+				tonemapped_tex->Release();
+				src_srv->Release();
+				dest_uav->Release();
+
+				return nullptr;
+			}
+
+			ctx->CSSetConstantBuffers(0, 1, &tonemap_const_buffer);
+		}
+
+		D3D11_MAPPED_SUBRESOURCE mapped_cb;
+		ctx->Map(tonemap_const_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_cb);
+		memcpy(mapped_cb.pData, &tonemap_cb_data, sizeof(tonemap_constant_buffer_t));
+		ctx->Unmap(tonemap_const_buffer, 0);
+
 		ctx->CSSetShader(tonemap_cs, nullptr, 0);
 		ctx->CSSetShaderResources(0, 1, &src_srv);
 		ctx->CSSetUnorderedAccessViews(0, 1, &dest_uav, nullptr);
-
 		ctx->Dispatch((desc.Width + 15) / 16, (desc.Height + 15) / 16, 1);
 
 		ctx->CSSetShader(nullptr, nullptr, 0);
-		ID3D11ShaderResourceView* null_srv = nullptr;
-		ctx->CSSetShaderResources(0, 1, &null_srv);
-		ID3D11UnorderedAccessView* null_uav = nullptr;
-		ctx->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
 
 		src_srv->Release();
+		src_srv = nullptr;
+		ctx->CSSetShaderResources(0, 1, &src_srv);
+
 		dest_uav->Release();
+		dest_uav = nullptr;
+		ctx->CSSetUnorderedAccessViews(0, 1, &dest_uav, nullptr);
 
 		return tonemapped_tex;
 	}
@@ -454,8 +567,11 @@ namespace
 		DXGI_OUTPUT_DESC1 desc;
 		target_output->GetDesc1(&desc);
 
-		// if (desc.ColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
-		//	return reinterpret_cast<decltype(BitBlt)*>(BitBlt_Original)(hdc, x, y, cx, cy, hdcSrc, x1, y1, rop);
+		if (desc.ColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
+			return reinterpret_cast<decltype(BitBlt)*>(BitBlt_Original)(hdc, x, y, cx, cy, hdcSrc, x1, y1, rop);
+
+		tonemap_cb_data.white_level = get_sdr_white_level(desc.Monitor);
+		printf("white level: %f\n", tonemap_cb_data.white_level);
 
 		std::vector<uint8_t> buffer;
 		int width, height;
