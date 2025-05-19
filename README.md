@@ -17,7 +17,7 @@ Go to [releases](https://github.com/GEEKiDoS/bitblt-hdr/releases)
     - In order to get it working, "Override high DPI scaling behavior" must set to "Application" in Compatibility setting for QQ.exe
 3. Snipaste (2.10.6)
 
-### Unknown Issue
+### Known Issue
 1. Multi-monitor is borken
 2. Screenshot under 1680x1050 is broken
 
