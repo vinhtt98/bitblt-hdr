@@ -161,14 +161,15 @@ namespace
 		return true;
 	}
 
-	void compile_tonemapper_cs()
+	bool compile_tonemapper_cs()
 	{
 		if (tonemap_cs)
 		{
 #if _DEBUG
 			tonemap_cs->Release();
+			tonemap_cs = nullptr;
 #else
-			return;
+			return true;
 #endif
 		}
 
@@ -187,7 +188,7 @@ namespace
 
 		if (error)
 		{
-			printf("compile_tonemapper_cs shader compile error: %s\n", error->GetBufferPointer());
+			printf("compile_tonemapper_cs shader compile: %s\n", reinterpret_cast<const char *>(error->GetBufferPointer()));
 			error->Release();
 		}
 
@@ -198,7 +199,7 @@ namespace
 			if (shader)
 				shader->Release();
 
-			return;
+			return false;
 		}
 
 		hr = device->CreateComputeShader(
@@ -211,20 +212,21 @@ namespace
 		if (FAILED(hr))
 		{
 			printf("compile_tonemapper_cs failed at line %d, hr = 0x%x\n", __LINE__, hr);
+			return false;
 		}
 #else
 		auto* const res = FindResourceA(self_instance, MAKEINTRESOURCE(TONEMAPPER_SHADER), RT_RCDATA);
 		if (!res)
 		{
 			printf("compile_tonemapper_cs resource not found\n");
-			return;
+			return false;
 		}
 
 		auto* const handle = LoadResource(self_instance, res);
 		if (!handle)
 		{
 			printf("compile_tonemapper_cs failed to load resource\n");
-			return;
+			return false;
 		}
 
 		const auto* bytecode = LockResource(handle);
@@ -240,8 +242,11 @@ namespace
 		if (FAILED(hr))
 		{
 			printf("compile_tonemapper_cs failed at line %d, hr = 0x%x\n", __LINE__, hr);
+			return false;
 		}
 #endif
+
+		return true;
 	}
 
 	void free_desktop_dup()
@@ -343,7 +348,9 @@ namespace
 
 	void capture_frame(std::vector<uint8_t>& buffer, int& width, int& height)
 	{
-		compile_tonemapper_cs();
+		if (!compile_tonemapper_cs())
+			return;
+
 		if (!dup) recreate_desktop_duplication_api();
 
 		DXGI_OUTDUPL_FRAME_INFO frame_info{ 0 };
@@ -447,8 +454,8 @@ namespace
 		DXGI_OUTPUT_DESC1 desc;
 		target_output->GetDesc1(&desc);
 
-		if (desc.ColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
-			return reinterpret_cast<decltype(BitBlt)*>(BitBlt_Original)(hdc, x, y, cx, cy, hdcSrc, x1, y1, rop);
+		// if (desc.ColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
+		//	return reinterpret_cast<decltype(BitBlt)*>(BitBlt_Original)(hdc, x, y, cx, cy, hdcSrc, x1, y1, rop);
 
 		std::vector<uint8_t> buffer;
 		int width, height;
