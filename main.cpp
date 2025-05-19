@@ -458,7 +458,6 @@ namespace
 #if _DEBUG
 			create_console();
 #endif
-
 			LoadLibraryA("gdi32.dll");
 			MH_Initialize();
 			MH_CreateHookApi(L"gdi32.dll", "BitBlt", BitBltHook, &BitBlt_Original);
