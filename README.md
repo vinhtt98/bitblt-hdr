@@ -8,12 +8,18 @@ Go to [releases](https://github.com/GEEKiDoS/bitblt-hdr/releases)
 
 ### How to use
 1. Close your screenshotter
-2. Put `version.dll` next exe of your screenshotter (must be x64 program for now)
+2. Put `version.dll` next to the exe of your screenshotter
 3. You are good to go
 
 ### Tested Screenshotters
 1. Tencent QQ (9.9.12-26466, NT Build with screenshot code in `wrapper.node`)
-2. Snipaste (2.10.6-x64)
+2. Tencent QQ (9.7.23, old non-NT 32bit build)
+    - In order to get it working, "Override high DPI scaling behavior" must set to "Application" in Compatibility setting for QQ.exe
+3. Snipaste (2.10.6)
+
+### Unknown Issue
+1. Multi-monitor is borken
+2. Screenshot under 1680x1050 is broken
 
 ### Result Image (using QQ Screenshot):
 ![result](./screenshot/result.jpg)
