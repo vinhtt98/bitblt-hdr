@@ -7,6 +7,7 @@
 #include <d3dcompiler.h>
 
 #include <vector>
+#include <format>
 
 #include <MinHook.h>
 
@@ -25,6 +26,28 @@ namespace
 	IDXGIOutput6* target_output = nullptr;
 
 	HINSTANCE self_instance;
+
+	bool recreate_desktop_duplication_api()
+	{
+		if (dup)
+		{
+			dup->Release();
+			dup = nullptr;
+		}
+
+		const DXGI_FORMAT formats[] = { DXGI_FORMAT_R16G16B16A16_FLOAT };
+		auto hr = target_output->DuplicateOutput1(device, 0, 1, formats, &dup);
+
+		if (FAILED(hr))
+		{
+			auto msg = std::format("recreate_desktop_duplication_api failed at line {}: {:X}", static_cast<unsigned long>(hr));
+			MessageBoxA(nullptr, msg.data(), "Fatal", MB_OK | MB_ICONERROR);
+
+			return false;
+		}
+
+		return true;
+	}
 
 	bool init_desktop_dup()
 	{
@@ -134,25 +157,6 @@ namespace
 			return false;
 		}
 
-		const DXGI_FORMAT formats[] = { DXGI_FORMAT_R16G16B16A16_FLOAT };
-		hr = target_output->DuplicateOutput1(device, 0, 1, formats, &dup);
-
-		if (FAILED(hr))
-		{
-			printf("init_desktop_dup failed at line %d, hr = 0x%x\n", __LINE__, hr);
-
-			ctx->Release();
-			device->Release();
-
-			ctx = nullptr;
-			device = nullptr;
-
-			target_output->Release();
-			target_adapter->Release();
-
-			return false;
-		}
-
 		target_adapter->Release();
 		return true;
 	}
@@ -232,7 +236,7 @@ namespace
 		);
 
 		FreeResource(handle);
-		
+
 		if (FAILED(hr))
 		{
 			printf("compile_tonemapper_cs failed at line %d, hr = 0x%x\n", __LINE__, hr);
@@ -340,6 +344,7 @@ namespace
 	void capture_frame(std::vector<uint8_t>& buffer, int& width, int& height)
 	{
 		compile_tonemapper_cs();
+		if (!dup) recreate_desktop_duplication_api();
 
 		DXGI_OUTDUPL_FRAME_INFO frame_info{ 0 };
 		IDXGIResource* resource = nullptr;
@@ -349,12 +354,35 @@ namespace
 		while (!frame_info.LastPresentTime.QuadPart)
 		{
 			Sleep(0);
-			dup->AcquireNextFrame(0, &frame_info, &resource);
+			hr = dup->AcquireNextFrame(0, &frame_info, &resource);
 
-			if (FAILED(hr)) return;
+			if (hr == DXGI_ERROR_ACCESS_LOST)
+			{
+				auto result = recreate_desktop_duplication_api();
+				if (!result) return;
+
+				continue;
+			}
+
+			if (hr == DXGI_ERROR_WAIT_TIMEOUT)
+			{
+				Sleep(20);
+				continue;
+			}
+
+			if (FAILED(hr))
+			{
+				auto msg = std::format("failed to acquire next frame: {:x}", hr);
+				MessageBoxA(nullptr, msg.data(), "Fatal", MB_OK | MB_ICONERROR);
+				return;
+			}
 
 			if (!frame_info.LastPresentTime.QuadPart)
-				dup->ReleaseFrame();
+			{
+				hr = dup->ReleaseFrame();
+
+				if (FAILED(hr)) return;
+			}
 		}
 
 		ID3D11Texture2D* tex = nullptr;
