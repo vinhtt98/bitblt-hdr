@@ -16,6 +16,7 @@ Go to [releases](https://github.com/GEEKiDoS/bitblt-hdr/releases)
 2. Tencent QQ (9.7.23, old non-NT 32bit build)
     - In order to get it working, "Override high DPI scaling behavior" must set to "Application" in Compatibility setting for QQ.exe
 3. Snipaste (2.10.6)
+4. Flameshot (12.1.0)
 
 ### Known Issue
 1. Multi-monitor is borken
