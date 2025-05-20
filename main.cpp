@@ -561,7 +561,13 @@ namespace
 
 		static bool inited = init_desktop_dup();
 
-		if (!inited || (rop & CAPTUREBLT) == 0)
+		if (!inited)
+			return reinterpret_cast<decltype(BitBlt)*>(BitBlt_Original)(hdc, x, y, cx, cy, hdcSrc, x1, y1, rop);
+
+		auto src_window = WindowFromDC(hdcSrc);
+		auto desktop_window = GetDesktopWindow();
+
+		if (src_window != desktop_window)
 			return reinterpret_cast<decltype(BitBlt)*>(BitBlt_Original)(hdc, x, y, cx, cy, hdcSrc, x1, y1, rop);
 
 		DXGI_OUTPUT_DESC1 desc;
