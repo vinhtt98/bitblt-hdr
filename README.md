@@ -22,8 +22,8 @@ Go to [releases](https://github.com/GEEKiDoS/bitblt-hdr/releases)
 1. Multi-monitor is borken
 2. Screenshot under 1680x1050 is broken
 
-### Result Image (using QQ Screenshot):
-![result](./screenshot/result.jpg)
+### Demo Video (with Snipaste)
+https://github.com/user-attachments/assets/0ef47c17-b880-4819-943f-74253cb13bf0
 
 ### Disclaimer
 Use it with QQNT could somehow resulted in a banned account.
