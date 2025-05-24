@@ -24,7 +24,7 @@ jobs:
           - Release
         platform:
           - x64
-          - Win32
+          - x86
     steps:
       - name: Check out files
         uses: actions/checkout@v3.5.2
