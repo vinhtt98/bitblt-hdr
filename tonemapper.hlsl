@@ -4,7 +4,8 @@ RWTexture2D<float4> dest : register(u0);
 cbuffer data : register(b0)
 {
 	float white_level;
-	float reserved[3];
+	uint is_hdr;
+	float2 pos;
 }
 
 float3 soft_clip(float3 x)
@@ -45,15 +46,19 @@ float3 neutral(float3 color)
 	color -= offset;
 
 	float peak = max(color.r, max(color.g, color.b));
-	if (peak < startCompression)
-		return color;
+	float3 result = color;
+	
+	if (peak >= startCompression)
+	{
+		const float d = 1.0 - startCompression;
+		float newPeak = 1.0 - d * d / (peak + d - startCompression);
+		color *= newPeak / peak;
 
-	const float d = 1.0 - startCompression;
-	float newPeak = 1.0 - d * d / (peak + d - startCompression);
-	color *= newPeak / peak;
-
-	float g = 1.0 - 1.0 / (desaturation * (peak - newPeak) + 1.0);
-	return lerp(color, newPeak.xxx, g);
+		float g = 1.0 - 1.0 / (desaturation * (peak - newPeak) + 1.0);
+		result = lerp(color, newPeak.xxx, g);
+	}
+	
+	return result;
 }
 
 [numthreads(16, 16, 1)]
@@ -67,17 +72,25 @@ void main(uint3 tid : SV_DispatchThreadID)
 		return;
 	}
 
-	float3 input_color = clamp(src[tid.xy].rgb, 0, 10000) / (white_level / 80);
-	float3 linear_color = bt2020_inv_gamma(input_color);
+	float3 src_color = src[tid.xy].rgb;
+	if (is_hdr == 1)
+	{
+		float3 input_color = clamp(src_color, 0, 10000) / (white_level / 80);
+		float3 linear_color = bt2020_inv_gamma(input_color);
 
-	float3 linear_result = linear_tonemap(linear_color);
-	float3 neutral_result = neutral(linear_color);
+		float3 linear_result = linear_tonemap(linear_color);
+		float3 neutral_result = neutral(linear_color);
 
-	float linear_luma = rgb_to_luma(linear_result);
-	float neutral_luma = rgb_to_luma(neutral_result);
-	float3 neutral_color = neutral_result / neutral_luma;
+		float linear_luma = rgb_to_luma(linear_result);
+		float neutral_luma = rgb_to_luma(neutral_result);
+		float3 neutral_color = neutral_result / neutral_luma;
 
-	linear_color = neutral_color * linear_luma;
+		linear_color = neutral_color * linear_luma;
 
-	dest[tid.xy] = float4(linear_color, 1.0);
+		dest[tid.xy + pos] = float4(linear_color, 1.0);
+	}
+	else
+	{
+		dest[tid.xy + pos] = float4(src_color, 1.0);
+	}
 }
