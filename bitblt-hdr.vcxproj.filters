@@ -39,6 +39,7 @@
     <ClCompile Include="deps\minhook\src\trampoline.c">
       <Filter>deps\minhook</Filter>
     </ClCompile>
+    <ClCompile Include="monitor.cpp" />
   </ItemGroup>
   <ItemGroup>
     <MASM Include="dllproxy\version.asm">
@@ -71,6 +72,7 @@
       <Filter>deps\minhook</Filter>
     </ClInclude>
     <ClInclude Include="resource.h" />
+    <ClInclude Include="monitor.hpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="resource.rc" />

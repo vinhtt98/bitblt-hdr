@@ -13,6 +13,8 @@
 
 #include "resource.h"
 
+#include "monitor.hpp"
+
 #ifndef _DEBUG
 #define printf(...) ((void) 0)
 #endif
@@ -21,196 +23,34 @@ namespace
 {
 	ID3D11Device* device = nullptr;
 	ID3D11DeviceContext* ctx = nullptr;
-	IDXGIOutputDuplication* dup = nullptr;
-	ID3D11ComputeShader* tonemap_cs = nullptr;
-	IDXGIOutput6* target_output = nullptr;
+	ID3D11ComputeShader* render_cs = nullptr;
+	ID3D11Texture2D* virtual_desktop_tex = nullptr;
 
-	struct tonemap_constant_buffer_t
+	int w = 0, h = 0;
+	
+	struct render_constant_buffer_t
 	{
 		float white_level = 200.0f;
-		float reserved[3];
-	} tonemap_cb_data;
+		uint32_t is_hdr = 0;
+		float x = 0.f;
+		float y = 0.f;
+	} render_cb_data;
 
-	ID3D11Buffer* tonemap_const_buffer = nullptr;
+	ID3D11Buffer* render_const_buffer = nullptr;
 
 	HINSTANCE self_instance;
 
-	bool recreate_desktop_duplication_api()
-	{
-		if (dup)
-		{
-			dup->Release();
-			dup = nullptr;
-		}
-
-		const DXGI_FORMAT formats[] = { DXGI_FORMAT_R16G16B16A16_FLOAT };
-		auto hr = target_output->DuplicateOutput1(device, 0, 1, formats, &dup);
-
-		if (FAILED(hr))
-		{
-			auto msg = std::format("recreate_desktop_duplication_api failed at line {}: {:X}", static_cast<unsigned long>(hr));
-			MessageBoxA(nullptr, msg.data(), "Fatal", MB_OK | MB_ICONERROR);
-
-			return false;
-		}
-
-		return true;
-	}
-
-	// https://chromium.googlesource.com/chromium/src/+/c71f15ab1ace78c7efeeeda9f8552b4af9db2877/ui/display/win/screen_win.cc#112
-	bool get_path_info(HMONITOR monitor, DISPLAYCONFIG_PATH_INFO* path_info)
-	{
-		LONG result;
-		uint32_t num_path_array_elements = 0;
-		uint32_t num_mode_info_array_elements = 0;
-		std::vector<DISPLAYCONFIG_PATH_INFO> path_infos;
-		std::vector<DISPLAYCONFIG_MODE_INFO> mode_infos;
-
-		// Get the monitor name.
-		MONITORINFOEXW view_info;
-		view_info.cbSize = sizeof(view_info);
-
-		if (!GetMonitorInfoW(monitor, &view_info))
-			return false;
-
-		// Get all path infos.
-		do
-		{
-			if (GetDisplayConfigBufferSizes(
-				QDC_ONLY_ACTIVE_PATHS, &num_path_array_elements,
-				&num_mode_info_array_elements) != ERROR_SUCCESS)
-			{
-				return false;
-			}
-			path_infos.resize(num_path_array_elements);
-			mode_infos.resize(num_mode_info_array_elements);
-			result = QueryDisplayConfig(
-				QDC_ONLY_ACTIVE_PATHS, &num_path_array_elements, path_infos.data(),
-				&num_mode_info_array_elements, mode_infos.data(), nullptr);
-		} while (result == ERROR_INSUFFICIENT_BUFFER);
-
-		// Iterate of the path infos and see if we find one with a matching name.
-		if (result == ERROR_SUCCESS)
-		{
-			for (uint32_t p = 0; p < num_path_array_elements; p++)
-			{
-				DISPLAYCONFIG_SOURCE_DEVICE_NAME device_name;
-				device_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-				device_name.header.size = sizeof(device_name);
-				device_name.header.adapterId = path_infos[p].sourceInfo.adapterId;
-				device_name.header.id = path_infos[p].sourceInfo.id;
-				if (DisplayConfigGetDeviceInfo(&device_name.header) == ERROR_SUCCESS)
-				{
-					if (wcscmp(view_info.szDevice, device_name.viewGdiDeviceName) == 0)
-					{
-						*path_info = path_infos[p];
-						return true;
-					}
-				}
-			}
-		}
-
-		return false;
-	}
-
-	float get_sdr_white_level(HMONITOR monitor)
-	{
-		const float default_white_level = 200.0f;
-
-		DISPLAYCONFIG_PATH_INFO path_info = {};
-		if (!get_path_info(monitor, &path_info))
-			return default_white_level; // default
-
-		DISPLAYCONFIG_SDR_WHITE_LEVEL white_level = {};
-		white_level.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
-		white_level.header.size = sizeof(white_level);
-		white_level.header.adapterId = path_info.targetInfo.adapterId;
-		white_level.header.id = path_info.targetInfo.id;
-		if (DisplayConfigGetDeviceInfo(&white_level.header) != ERROR_SUCCESS)
-			return default_white_level;
-
-		return white_level.SDRWhiteLevel * 80.0f / 1000.0f;
-	}
+	std::vector<std::unique_ptr<monitor>> monitors;
 
 	bool init_desktop_dup()
 	{
-		if (device && ctx && dup && tonemap_cs)
+		if (device && ctx)
 			return true;
-
-		HRESULT hr;
-
-		IDXGIFactory6* factory;
-		hr = CreateDXGIFactory1(__uuidof(IDXGIFactory6), reinterpret_cast<void**>(&factory));
-
-		if (FAILED(hr))
-		{
-			printf("init_desktop_dup failed at line %d, hr = 0x%x\n", __LINE__, hr);
-			return false;
-		}
-
-		auto adapter_index = 0u;
-		IDXGIAdapter1* target_adapter = nullptr;
-		while (!target_adapter)
-		{
-			IDXGIAdapter4* adapter;
-			hr = factory->EnumAdapters1(adapter_index++, reinterpret_cast<IDXGIAdapter1**>(&adapter));
-
-			if (FAILED(hr))
-			{
-				printf("init_desktop_dup failed at line %d, hr = 0x%x\n", __LINE__, hr);
-
-				factory->Release();
-				return false;
-			}
-
-			auto outputIndex = 0u;
-			while (true)
-			{
-				IDXGIOutput6* output;
-				hr = adapter->EnumOutputs(outputIndex++, reinterpret_cast<IDXGIOutput**>(&output));
-
-				if (FAILED(hr))
-				{
-					printf("init_desktop_dup failed at line %d, hr = 0x%x\n", __LINE__, hr);
-
-					adapter->Release();
-					factory->Release();
-					return false;
-				}
-
-				DXGI_OUTPUT_DESC1 desc;
-				hr = output->GetDesc1(&desc);
-
-				if (FAILED(hr))
-				{
-					printf("init_desktop_dup failed at line %d, hr = 0x%x\n", __LINE__, hr);
-
-					output->Release();
-					adapter->Release();
-					factory->Release();
-					return false;
-				}
-
-				if (desc.AttachedToDesktop)
-				{
-					target_adapter = adapter;
-					target_output = output;
-					break;
-				}
-
-				output->Release();
-			}
-
-			if (target_adapter != adapter)
-				adapter->Release();
-		}
-
-		factory->Release();
 
 		D3D_FEATURE_LEVEL feature_level;
 
-		hr = D3D11CreateDevice(
-			target_adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+		HRESULT hr = D3D11CreateDevice(
+			nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
 #ifdef _DEBUG
 			D3D11_CREATE_DEVICE_DEBUG,
 #else
@@ -223,9 +63,6 @@ namespace
 		if (FAILED(hr))
 		{
 			printf("init_desktop_dup failed at line %d, hr = 0x%x\n", __LINE__, hr);
-
-			target_output->Release();
-			target_adapter->Release();
 			return false;
 		}
 
@@ -235,23 +72,89 @@ namespace
 
 			device->Release();
 			device = nullptr;
-			target_output->Release();
-			target_adapter->Release();
+
+			ctx->Release();
+			ctx = nullptr;
+
 			return false;
 		}
-
-		target_adapter->Release();
 
 		return true;
 	}
 
-	bool compile_tonemapper_cs()
+	void enum_monitors()
 	{
-		if (tonemap_cs)
+		if (monitors.size())
+			monitors.clear();
+
+		IDXGIDevice *dxgi_device;
+		HRESULT hr = device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgi_device));
+
+		if (FAILED(hr))
+		{
+			auto msg = std::format("enum_monitors failed to QueryInterface: {:x}", hr);
+			throw std::runtime_error{ msg };
+		}
+
+		IDXGIAdapter *adapter;
+		hr = dxgi_device->GetAdapter(&adapter);
+
+		if (FAILED(hr))
+		{
+			dxgi_device->Release();
+
+			auto msg = std::format("enum_monitors failed to GetAdapter: {:x}", hr);
+			throw std::runtime_error{ msg };
+		}
+
+		auto outputIndex = 0u;
+		while (true)
+		{
+			IDXGIOutput6* output;
+			hr = adapter->EnumOutputs(outputIndex++, reinterpret_cast<IDXGIOutput**>(&output));
+
+			if (hr == DXGI_ERROR_NOT_FOUND)
+			{
+				break;
+			}
+
+			if (FAILED(hr))
+			{
+				adapter->Release();
+				dxgi_device->Release();
+
+				auto msg = std::format("enum_monitors failed to EnumOutputs: {:x}", hr);
+				throw std::runtime_error{ msg };
+			}
+
+			DXGI_OUTPUT_DESC1 desc;
+			hr = output->GetDesc1(&desc);
+
+			if (FAILED(hr))
+			{
+				output->Release();
+
+				printf("enum_monitors failed to GetDesc1: %x", hr);
+				continue;
+			}
+
+			if (desc.AttachedToDesktop)
+			{
+				monitors.push_back(std::make_unique<monitor>(output, device));
+				continue;
+			}
+
+			output->Release();
+		}
+	}
+
+	bool compile_shader()
+	{
+		if (render_cs)
 		{
 #if _DEBUG
-			tonemap_cs->Release();
-			tonemap_cs = nullptr;
+			render_cs->Release();
+			render_cs = nullptr;
 #else
 			return true;
 #endif
@@ -272,13 +175,13 @@ namespace
 
 		if (error)
 		{
-			printf("compile_tonemapper_cs shader compile: %s\n", reinterpret_cast<const char*>(error->GetBufferPointer()));
+			printf("compile_shader: %s\n", reinterpret_cast<const char*>(error->GetBufferPointer()));
 			error->Release();
 		}
 
 		if (FAILED(hr))
 		{
-			printf("compile_tonemapper_cs failed at line %d, hr = 0x%x\n", __LINE__, hr);
+			printf("compile_shader failed at line %d, hr = 0x%x\n", __LINE__, hr);
 
 			if (shader)
 				shader->Release();
@@ -288,28 +191,28 @@ namespace
 
 		hr = device->CreateComputeShader(
 			shader->GetBufferPointer(), shader->GetBufferSize(),
-			nullptr, &tonemap_cs
+			nullptr, &render_cs
 		);
 
 		shader->Release();
 
 		if (FAILED(hr))
 		{
-			printf("compile_tonemapper_cs failed at line %d, hr = 0x%x\n", __LINE__, hr);
+			printf("compile_shader failed at line %d, hr = 0x%x\n", __LINE__, hr);
 			return false;
 		}
 #else
 		auto* const res = FindResourceA(self_instance, MAKEINTRESOURCE(TONEMAPPER_SHADER), RT_RCDATA);
 		if (!res)
 		{
-			printf("compile_tonemapper_cs resource not found\n");
+			printf("compile_shader resource not found\n");
 			return false;
 		}
 
 		auto* const handle = LoadResource(self_instance, res);
 		if (!handle)
 		{
-			printf("compile_tonemapper_cs failed to load resource\n");
+			printf("compile_shader failed to load resource\n");
 			return false;
 		}
 
@@ -318,14 +221,14 @@ namespace
 
 		HRESULT hr = device->CreateComputeShader(
 			bytecode, size,
-			nullptr, &tonemap_cs
+			nullptr, &render_cs
 		);
 
 		FreeResource(handle);
 
 		if (FAILED(hr))
 		{
-			printf("compile_tonemapper_cs failed at line %d, hr = 0x%x\n", __LINE__, hr);
+			printf("compile_shader failed at line %d, hr = 0x%x\n", __LINE__, hr);
 			return false;
 		}
 #endif
@@ -335,16 +238,12 @@ namespace
 
 	void free_desktop_dup()
 	{
-		if (tonemap_cs)
-		{
-			tonemap_cs->Release();
-			tonemap_cs = nullptr;
-		}
+		monitors.clear();
 
-		if (dup)
+		if (render_cs)
 		{
-			dup->Release();
-			dup = nullptr;
+			render_cs->Release();
+			render_cs = nullptr;
 		}
 
 		if (ctx)
@@ -358,43 +257,28 @@ namespace
 			device->Release();
 			device = nullptr;
 		}
-
-		if (target_output)
-		{
-			target_output->Release();
-			target_output = nullptr;
-		}
 	}
 
-	ID3D11Texture2D* tonemap(ID3D11Texture2D* input)
+	bool render(ID3D11Texture2D* input, ID3D11Texture2D* target)
 	{
-		// Do tonemapping with CS
+		if (!compile_shader())
+			return false;
+
 		D3D11_TEXTURE2D_DESC desc;
 		input->GetDesc(&desc);
-		desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-		desc.Usage = D3D11_USAGE_DEFAULT;
-		desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-		desc.MiscFlags = 0;
-		desc.CPUAccessFlags = 0;
 
-		ID3D11Texture2D* tonemapped_tex = nullptr;
-		HRESULT hr = device->CreateTexture2D(&desc, nullptr, &tonemapped_tex);
-		if (FAILED(hr))
-		{
-			return nullptr;
-		}
+		render_cb_data.is_hdr = desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
 
 		ID3D11ShaderResourceView* src_srv;
 		D3D11_SHADER_RESOURCE_VIEW_DESC src_desc = {};
-		src_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+		src_desc.Format = desc.Format;
 		src_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
 		src_desc.Texture2D.MipLevels = 1;
-		hr = device->CreateShaderResourceView(input, &src_desc, &src_srv);
+		HRESULT hr = device->CreateShaderResourceView(input, &src_desc, &src_srv);
 
 		if (FAILED(hr))
 		{
-			tonemapped_tex->Release();
-			return nullptr;
+			return false;
 		}
 
 		ID3D11UnorderedAccessView* dest_uav;
@@ -402,46 +286,44 @@ namespace
 		dest_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
 		dest_desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
 		dest_desc.Texture2D.MipSlice = 0;
-		hr = device->CreateUnorderedAccessView(tonemapped_tex, &dest_desc, &dest_uav);
+		hr = device->CreateUnorderedAccessView(target, &dest_desc, &dest_uav);
 
 		if (FAILED(hr))
 		{
-			tonemapped_tex->Release();
 			src_srv->Release();
 
-			return nullptr;
+			return false;
 		}
 
-		if (!tonemap_const_buffer)
+		if (!render_const_buffer)
 		{
 			D3D11_BUFFER_DESC cb_desc;
-			cb_desc.ByteWidth = sizeof(tonemap_constant_buffer_t);
+			cb_desc.ByteWidth = sizeof(render_constant_buffer_t);
 			cb_desc.Usage = D3D11_USAGE_DYNAMIC;
 			cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 			cb_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 			cb_desc.MiscFlags = 0;
 			cb_desc.StructureByteStride = 0;
 
-			hr = device->CreateBuffer(&cb_desc, nullptr, &tonemap_const_buffer);
+			hr = device->CreateBuffer(&cb_desc, nullptr, &render_const_buffer);
 
 			if (FAILED(hr))
 			{
-				tonemapped_tex->Release();
 				src_srv->Release();
 				dest_uav->Release();
 
-				return nullptr;
+				return false;
 			}
 
-			ctx->CSSetConstantBuffers(0, 1, &tonemap_const_buffer);
+			ctx->CSSetConstantBuffers(0, 1, &render_const_buffer);
 		}
 
 		D3D11_MAPPED_SUBRESOURCE mapped_cb;
-		ctx->Map(tonemap_const_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_cb);
-		memcpy(mapped_cb.pData, &tonemap_cb_data, sizeof(tonemap_constant_buffer_t));
-		ctx->Unmap(tonemap_const_buffer, 0);
+		ctx->Map(render_const_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_cb);
+		memcpy(mapped_cb.pData, &render_cb_data, sizeof(render_constant_buffer_t));
+		ctx->Unmap(render_const_buffer, 0);
 
-		ctx->CSSetShader(tonemap_cs, nullptr, 0);
+		ctx->CSSetShader(render_cs, nullptr, 0);
 		ctx->CSSetShaderResources(0, 1, &src_srv);
 		ctx->CSSetUnorderedAccessViews(0, 1, &dest_uav, nullptr);
 		ctx->Dispatch((desc.Width + 15) / 16, (desc.Height + 15) / 16, 1);
@@ -456,102 +338,92 @@ namespace
 		dest_uav = nullptr;
 		ctx->CSSetUnorderedAccessViews(0, 1, &dest_uav, nullptr);
 
-		return tonemapped_tex;
+		return true;
 	}
 
-	void capture_frame(std::vector<uint8_t>& buffer, int& width, int& height)
+	void capture_frame(std::vector<uint8_t>& buffer, int width, int height)
 	{
-		if (!compile_tonemapper_cs())
-			return;
-
-		if (!dup) recreate_desktop_duplication_api();
-
-		DXGI_OUTDUPL_FRAME_INFO frame_info{ 0 };
-		IDXGIResource* resource = nullptr;
-
 		HRESULT hr = S_OK;
 
-		while (!frame_info.LastPresentTime.QuadPart)
+		if (width != w || height != h)
 		{
-			Sleep(0);
-			hr = dup->AcquireNextFrame(0, &frame_info, &resource);
-
-			if (hr == DXGI_ERROR_ACCESS_LOST)
+			if (virtual_desktop_tex)
 			{
-				auto result = recreate_desktop_duplication_api();
-				if (!result) return;
-
-				continue;
+				virtual_desktop_tex->Release();
+				virtual_desktop_tex = nullptr;
 			}
 
-			if (hr == DXGI_ERROR_WAIT_TIMEOUT)
-			{
-				Sleep(20);
-				continue;
-			}
+			enum_monitors();
 
+			w = width;
+			h = height;
+		}
+
+		if (!virtual_desktop_tex)
+		{
+			D3D11_TEXTURE2D_DESC desc;
+			desc.Width = w;
+			desc.Height = h;
+			desc.MipLevels = 1;
+			desc.ArraySize = 1;
+			desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+			desc.SampleDesc.Count = 1;
+			desc.SampleDesc.Quality = 0;
+			desc.Usage = D3D11_USAGE_DEFAULT;
+			desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+			desc.MiscFlags = 0;
+			desc.CPUAccessFlags = 0;
+
+			hr = device->CreateTexture2D(&desc, nullptr, &virtual_desktop_tex);
 			if (FAILED(hr))
 			{
-				auto msg = std::format("failed to acquire next frame: {:x}", hr);
-				MessageBoxA(nullptr, msg.data(), "Fatal", MB_OK | MB_ICONERROR);
-				return;
-			}
-
-			if (!frame_info.LastPresentTime.QuadPart)
-			{
-				hr = dup->ReleaseFrame();
-
-				if (FAILED(hr)) return;
+				auto msg = std::format("failed to create virtual desktop texture: {:x}", hr);
+				throw std::runtime_error{ msg };
 			}
 		}
 
-		ID3D11Texture2D* tex = nullptr;
-		hr = resource->QueryInterface(IID_PPV_ARGS(&tex));
-
-		if (FAILED(hr))
+		for (const auto& monitor : monitors)
 		{
-			resource->Release();
-			dup->ReleaseFrame();
-			return;
+			monitor->update_output_desc();
+			const auto [x, y] = monitor->virtual_position();
+
+			render_cb_data.white_level = monitor->sdr_white_level();
+			render_cb_data.x = static_cast<float>(x);
+			render_cb_data.y = static_cast<float>(y);
+
+			auto* screenshot = monitor->take_screenshot();
+			if (!render(screenshot, virtual_desktop_tex)) [[unlikely]]
+			{
+				auto name = monitor->name();
+				printf("failed to render monitor %s to virtual desktop texture\n", name.data());
+			}
 		}
 
-		resource->Release();
-
-		auto* tonemapped = tonemap(tex);
-
-		tex->Release();
-
-		D3D11_TEXTURE2D_DESC desc;
-		tonemapped->GetDesc(&desc);
-		desc.Usage = D3D11_USAGE_STAGING;
-		desc.BindFlags = 0;
-		desc.MiscFlags = 0;
-		desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		D3D11_TEXTURE2D_DESC staging_desc;
+		virtual_desktop_tex->GetDesc(&staging_desc);
+		staging_desc.Usage = D3D11_USAGE_STAGING;
+		staging_desc.BindFlags = 0;
+		staging_desc.MiscFlags = 0;
+		staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
 
 		ID3D11Texture2D* staging_tex = nullptr;
-		hr = device->CreateTexture2D(&desc, nullptr, &staging_tex);
+		hr = device->CreateTexture2D(&staging_desc, nullptr, &staging_tex);
 		if (FAILED(hr))
 		{
-			tonemapped->Release();
-			dup->ReleaseFrame();
-			return;
+			auto msg = std::format("failed to create staging texture: {:x}", hr);
+			throw std::runtime_error{ msg };
 		}
 
-		ctx->CopyResource(staging_tex, tonemapped);
-		tonemapped->Release();
+		ctx->CopyResource(staging_tex, virtual_desktop_tex);
 
 		D3D11_MAPPED_SUBRESOURCE mapped;
 		ctx->Map(staging_tex, 0, D3D11_MAP_READ, 0, &mapped);
 
-		buffer.resize(desc.Width * desc.Height * 4);
+		buffer.resize(staging_desc.Width * staging_desc.Height * 4);
 		std::memcpy(buffer.data(), mapped.pData, buffer.size());
-
-		width = desc.Width;
-		height = desc.Height;
-
 		ctx->Unmap(staging_tex, 0);
+
 		staging_tex->Release();
-		dup->ReleaseFrame();
 	}
 
 	void* BitBlt_Original = nullptr;
@@ -570,20 +442,19 @@ namespace
 		if (src_window != desktop_window)
 			return reinterpret_cast<decltype(BitBlt)*>(BitBlt_Original)(hdc, x, y, cx, cy, hdcSrc, x1, y1, rop);
 
-		DXGI_OUTPUT_DESC1 desc;
-		target_output->GetDesc1(&desc);
-
-		if (desc.ColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
-			return reinterpret_cast<decltype(BitBlt)*>(BitBlt_Original)(hdc, x, y, cx, cy, hdcSrc, x1, y1, rop);
-
-		tonemap_cb_data.white_level = get_sdr_white_level(desc.Monitor);
-		printf("white level: %f\n", tonemap_cb_data.white_level);
-
 		std::vector<uint8_t> buffer;
-		int width, height;
-		capture_frame(buffer, width, height);
 
-		HBITMAP map = CreateBitmap(width, height, 1, 32, buffer.data());
+		try
+		{
+			capture_frame(buffer, cx, cy);
+		}
+		catch (std::runtime_error e)
+		{
+			printf("failed to capture_frame, error: \n%s\n", e.what());
+			return reinterpret_cast<decltype(BitBlt)*>(BitBlt_Original)(hdc, x, y, cx, cy, hdcSrc, x1, y1, rop);
+		}
+
+		HBITMAP map = CreateBitmap(cx, cy, 1, 32, buffer.data());
 		HDC src = CreateCompatibleDC(hdc);
 		SelectObject(src, map);
 
