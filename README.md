@@ -19,7 +19,7 @@ Go to [releases](https://github.com/GEEKiDoS/bitblt-hdr/releases)
 4. Flameshot (12.1.0)
 
 ### Known Issue
-1. Multi-monitor is borken
+1. ~~Multi-monitor is borken~~ Fixed in 0.6
 2. Screenshot under 1680x1050 is broken
 
 ### Demo Video (with Snipaste)
