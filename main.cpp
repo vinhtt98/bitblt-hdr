@@ -8,6 +8,7 @@
 
 #include <vector>
 #include <format>
+#include <numbers>
 
 #include <MinHook.h>
 
@@ -32,8 +33,10 @@ namespace
 	{
 		float white_level = 200.0f;
 		uint32_t is_hdr = 0;
-		float x = 0.f;
-		float y = 0.f;
+
+		float __gap[2];
+
+		float transform_matrix[3][4];
 	} render_cb_data;
 
 	ID3D11Buffer* render_const_buffer = nullptr;
@@ -386,10 +389,36 @@ namespace
 		{
 			monitor->update_output_desc();
 			const auto [x, y] = monitor->virtual_position();
+			const auto rotation = monitor->rotation();
+			const auto rad = rotation * (std::numbers::pi_v<float> / 180.f);
+
+			const auto sin_r = std::sinf(rad);
+			const auto cos_r = std::cosf(rad);
+
+			/*
+			*      cos(¦È) -sin(¦È) Tx
+			* Mt = sin(¦È)  cos(¦È) Ty
+			*      0       0      1
+			*/
+			render_cb_data.transform_matrix[0][0] = cos_r;
+			render_cb_data.transform_matrix[0][1] = -sin_r;
+			render_cb_data.transform_matrix[0][2] = static_cast<float>(x);
+
+			render_cb_data.transform_matrix[1][0] = sin_r;
+			render_cb_data.transform_matrix[1][1] = cos_r;
+			render_cb_data.transform_matrix[1][2] = static_cast<float>(y);
+
+			render_cb_data.transform_matrix[2][0] = 0;
+			render_cb_data.transform_matrix[2][1] = 0;
+			render_cb_data.transform_matrix[2][2] = 1;
+
+			printf("transform matrix: \n%.6f %.6f %.6f\n%.6f %.6f %.6f\n%.6f %.6f %.6f\n",
+				   render_cb_data.transform_matrix[0][0], render_cb_data.transform_matrix[0][1], render_cb_data.transform_matrix[0][2],
+				   render_cb_data.transform_matrix[1][0], render_cb_data.transform_matrix[1][1], render_cb_data.transform_matrix[1][2],
+				   render_cb_data.transform_matrix[2][0], render_cb_data.transform_matrix[2][1], render_cb_data.transform_matrix[2][2]
+			);
 
 			render_cb_data.white_level = monitor->sdr_white_level();
-			render_cb_data.x = static_cast<float>(x);
-			render_cb_data.y = static_cast<float>(y);
 
 			auto* screenshot = monitor->take_screenshot();
 			if (!render(screenshot, virtual_desktop_tex)) [[unlikely]]

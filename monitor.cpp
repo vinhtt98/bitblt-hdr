@@ -93,19 +93,34 @@ std::string monitor::name()
 	return name_;
 }
 
-bool monitor::hdr_on()
+bool monitor::hdr_on() const
 {
 	return desc_.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
 }
 
-vec2_t monitor::virtual_position()
+vec2_t monitor::virtual_position() const
 {
 	const auto& coords = desc_.DesktopCoordinates;
 
 	return { coords.left, coords.top };
 }
 
-vec2_t monitor::resolution()
+float monitor::rotation() const
+{
+	switch (desc_.Rotation)
+	{
+	case DXGI_MODE_ROTATION_ROTATE90:
+		return 90.f;
+	case DXGI_MODE_ROTATION_ROTATE180:
+		return 180.f;
+	case DXGI_MODE_ROTATION_ROTATE270:
+		return 270.f;
+	default:
+		return 0.f;
+	}
+}
+
+vec2_t monitor::resolution() const
 {
 	const auto& coords = desc_.DesktopCoordinates;
 	auto w = coords.right - coords.left;
@@ -114,7 +129,7 @@ vec2_t monitor::resolution()
 	return { w, h };
 }
 
-float monitor::sdr_white_level()
+float monitor::sdr_white_level() const
 {
 	const float default_white_level = 200.0f;
 

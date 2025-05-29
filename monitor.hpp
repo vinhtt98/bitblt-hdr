@@ -12,10 +12,11 @@ public:
 	~monitor();
 
 	std::string name();
-	bool hdr_on();
-	vec2_t virtual_position();
-	vec2_t resolution();
-	float sdr_white_level();
+	bool hdr_on() const;
+	vec2_t virtual_position() const;
+	float rotation() const;
+	vec2_t resolution() const;
+	float sdr_white_level() const;
 
 	ID3D11Texture2D* take_screenshot();
 	void update_output_desc();

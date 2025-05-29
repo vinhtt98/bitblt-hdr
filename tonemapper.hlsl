@@ -5,7 +5,7 @@ cbuffer data : register(b0)
 {
 	float white_level;
 	uint is_hdr;
-	float2 pos;
+	float3x3 transform;
 }
 
 float3 soft_clip(float3 x)
@@ -61,18 +61,43 @@ float3 neutral(float3 color)
 	return result;
 }
 
+uint2 calc_dest_pos(uint2 src, uint width, uint height)
+{
+	float2x2 rotation =
+	{
+		transform._11, transform._12,
+		transform._21, transform._22,
+	};
+	
+	float2 center = float2(width, height) / 2.0;
+	
+	float2 transfromed = mul(float3(src - center, 1), transform).xy;
+	float2 rotated_zero = mul(-center, rotation);
+
+	transfromed += abs(rotated_zero);
+	
+	// ??
+	transfromed.x -= 1;
+	
+	return uint2(round(transfromed));
+}
+
 [numthreads(16, 16, 1)]
 void main(uint3 tid : SV_DispatchThreadID)
 {
 	uint width, height;
 	src.GetDimensions(width, height);
 
-	if (tid.x >= width || tid.y >= height)
+	if (tid.x > width || tid.y > height)
 	{
 		return;
 	}
 
-	float3 src_color = src[tid.xy].rgb;
+	uint2 src_pos = tid.xy;
+	uint2 dest_pos = calc_dest_pos(src_pos, width, height);
+    
+	float3 src_color = src[src_pos].rgb;
+	
 	if (is_hdr == 1)
 	{
 		float3 input_color = clamp(src_color, 0, 10000) / (white_level / 80);
@@ -87,10 +112,10 @@ void main(uint3 tid : SV_DispatchThreadID)
 
 		linear_color = neutral_color * linear_luma;
 
-		dest[tid.xy + pos] = float4(linear_color, 1.0);
+		dest[dest_pos] = float4(linear_color, 1.0);
 	}
 	else
 	{
-		dest[tid.xy + pos] = float4(src_color, 1.0);
+		dest[dest_pos] = float4(src_color, 1.0);
 	}
 }
