@@ -61,25 +61,24 @@ float3 neutral(float3 color)
 	return result;
 }
 
-uint2 calc_dest_pos(uint2 src, uint width, uint height)
+uint2 calc_dest_pos(float2 src, uint width, uint height)
 {
-	float2x2 rotation =
-	{
-		transform._11, transform._12,
-		transform._21, transform._22,
-	};
-	
-	float2 center = float2(width, height) / 2.0;
-	
-	float2 transfromed = mul(float3(src - center, 1), transform).xy;
-	float2 rotated_zero = mul(-center, rotation);
+    float2x2 rotation =
+    {
+        transform._11, transform._12,
+        transform._21, transform._22,
+    };
 
-	transfromed += abs(rotated_zero);
-	
-	// ??
-	transfromed.x -= 1;
-	
-	return uint2(round(transfromed));
+    float2 center = float2(width, height) / 2.0;
+    float2 src_center = src + float2(0.5, 0.5);
+
+    float2 transformed = mul(float3(src_center - center, 1), transform).xy;
+    float2 rotated_zero = mul(-center, rotation);
+
+    transformed += abs(rotated_zero);
+    transformed -= float2(0.5, 0.5);
+
+    return uint2(round(transformed));
 }
 
 [numthreads(16, 16, 1)]
@@ -110,7 +109,7 @@ void main(uint3 tid : SV_DispatchThreadID)
 		float neutral_luma = rgb_to_luma(neutral_result);
 		float3 neutral_color = neutral_result / neutral_luma;
 
-		linear_color = neutral_color * linear_luma;
+		linear_color = lerp(linear_result, neutral_color * linear_luma, step(0.8, linear_luma));
 
 		dest[dest_pos] = float4(linear_color, 1.0);
 	}
