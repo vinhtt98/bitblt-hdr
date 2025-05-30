@@ -16,19 +16,19 @@
 
 #include "monitor.hpp"
 
-#ifndef _DEBUG
-#define printf(...) ((void) 0)
-#endif
+#include "utils/com_ptr.hpp"
+#include "utils/trampoline.hpp"
 
 namespace
 {
-	ID3D11Device* device = nullptr;
-	ID3D11DeviceContext* ctx = nullptr;
-	ID3D11ComputeShader* render_cs = nullptr;
-	ID3D11Texture2D* virtual_desktop_tex = nullptr;
+	com_ptr<ID3D11Device> device;
+	com_ptr<ID3D11DeviceContext> ctx;
+	com_ptr<ID3D11ComputeShader> render_cs;
+	com_ptr<ID3D11Texture2D> virtual_desktop_tex;
+	com_ptr<ID3D11Buffer> render_const_buffer;
 
 	int w = 0, h = 0;
-	
+
 	struct render_constant_buffer_t
 	{
 		float white_level = 200.0f;
@@ -38,8 +38,6 @@ namespace
 
 		float transform_matrix[3][4];
 	} render_cb_data;
-
-	ID3D11Buffer* render_const_buffer = nullptr;
 
 	HINSTANCE self_instance;
 
@@ -60,7 +58,7 @@ namespace
 			0,
 #endif
 			nullptr, 0, D3D11_SDK_VERSION,
-			&device, &feature_level, &ctx
+			device, &feature_level, ctx
 		);
 
 		if (FAILED(hr))
@@ -73,10 +71,7 @@ namespace
 		{
 			printf("init_desktop_dup failed at line %d, feature level < 11.0\n", __LINE__);
 
-			device->Release();
 			device = nullptr;
-
-			ctx->Release();
 			ctx = nullptr;
 
 			return false;
@@ -90,22 +85,16 @@ namespace
 		if (monitors.size())
 			monitors.clear();
 
-		IDXGIDevice *dxgi_device;
-		HRESULT hr = device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgi_device));
+		com_ptr<IDXGIDevice> dxgi_device = device.as<IDXGIDevice>();
+		
+		if (!dxgi_device)
+			throw std::runtime_error{ "enum_monitors failed to get as IDXGIDevice" };
+
+		com_ptr<IDXGIAdapter> adapter;
+		HRESULT hr = dxgi_device->GetAdapter(adapter);
 
 		if (FAILED(hr))
 		{
-			auto msg = std::format("enum_monitors failed to QueryInterface: {:x}", hr);
-			throw std::runtime_error{ msg };
-		}
-
-		IDXGIAdapter *adapter;
-		hr = dxgi_device->GetAdapter(&adapter);
-
-		if (FAILED(hr))
-		{
-			dxgi_device->Release();
-
 			auto msg = std::format("enum_monitors failed to GetAdapter: {:x}", hr);
 			throw std::runtime_error{ msg };
 		}
@@ -113,8 +102,8 @@ namespace
 		auto outputIndex = 0u;
 		while (true)
 		{
-			IDXGIOutput6* output;
-			hr = adapter->EnumOutputs(outputIndex++, reinterpret_cast<IDXGIOutput**>(&output));
+			com_ptr<IDXGIOutput> output;
+			hr = adapter->EnumOutputs(outputIndex++, output);
 
 			if (hr == DXGI_ERROR_NOT_FOUND)
 			{
@@ -123,31 +112,28 @@ namespace
 
 			if (FAILED(hr))
 			{
-				adapter->Release();
-				dxgi_device->Release();
-
 				auto msg = std::format("enum_monitors failed to EnumOutputs: {:x}", hr);
 				throw std::runtime_error{ msg };
 			}
 
+			com_ptr<IDXGIOutput6> output6 = output.as<IDXGIOutput6>();
+			if (!output6)
+				throw std::runtime_error{ "enum_monitors failed to get as IDXGIOutput6" };
+
 			DXGI_OUTPUT_DESC1 desc;
-			hr = output->GetDesc1(&desc);
+			hr = output6->GetDesc1(&desc);
 
 			if (FAILED(hr))
 			{
-				output->Release();
-
 				printf("enum_monitors failed to GetDesc1: %x", hr);
 				continue;
 			}
 
 			if (desc.AttachedToDesktop)
 			{
-				monitors.push_back(std::make_unique<monitor>(output, device));
+				monitors.push_back(std::make_unique<monitor>(output6, device));
 				continue;
 			}
-
-			output->Release();
 		}
 	}
 
@@ -156,7 +142,6 @@ namespace
 		if (render_cs)
 		{
 #if _DEBUG
-			render_cs->Release();
 			render_cs = nullptr;
 #else
 			return true;
@@ -165,39 +150,32 @@ namespace
 
 #if _DEBUG
 		// compile tonemapping compute shader
-		ID3DBlob* shader = nullptr;
-		ID3DBlob* error = nullptr;
+		com_ptr<ID3DBlob> shader;
+		com_ptr<ID3DBlob> error;
 
 		HRESULT hr = D3DCompileFromFile(
 			L"tonemapper.hlsl",
 			nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
 			"main", "cs_5_0",
 			D3DCOMPILE_ENABLE_STRICTNESS, 0,
-			&shader, &error
+			shader, error
 		);
 
 		if (error)
 		{
 			printf("compile_shader: %s\n", reinterpret_cast<const char*>(error->GetBufferPointer()));
-			error->Release();
 		}
 
 		if (FAILED(hr))
 		{
 			printf("compile_shader failed at line %d, hr = 0x%x\n", __LINE__, hr);
-
-			if (shader)
-				shader->Release();
-
 			return false;
 		}
 
 		hr = device->CreateComputeShader(
 			shader->GetBufferPointer(), shader->GetBufferSize(),
-			nullptr, &render_cs
+			nullptr, render_cs
 		);
-
-		shader->Release();
 
 		if (FAILED(hr))
 		{
@@ -224,7 +202,7 @@ namespace
 
 		HRESULT hr = device->CreateComputeShader(
 			bytecode, size,
-			nullptr, &render_cs
+			nullptr, render_cs
 		);
 
 		FreeResource(handle);
@@ -239,30 +217,7 @@ namespace
 		return true;
 	}
 
-	void free_desktop_dup()
-	{
-		monitors.clear();
-
-		if (render_cs)
-		{
-			render_cs->Release();
-			render_cs = nullptr;
-		}
-
-		if (ctx)
-		{
-			ctx->Release();
-			ctx = nullptr;
-		}
-
-		if (device)
-		{
-			device->Release();
-			device = nullptr;
-		}
-	}
-
-	bool render(ID3D11Texture2D* input, ID3D11Texture2D* target)
+	bool render(com_ptr<ID3D11Texture2D> input, com_ptr<ID3D11Texture2D> target)
 	{
 		if (!compile_shader())
 			return false;
@@ -272,29 +227,27 @@ namespace
 
 		render_cb_data.is_hdr = desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
 
-		ID3D11ShaderResourceView* src_srv;
+		com_ptr<ID3D11ShaderResourceView> src_srv;
 		D3D11_SHADER_RESOURCE_VIEW_DESC src_desc = {};
 		src_desc.Format = desc.Format;
 		src_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
 		src_desc.Texture2D.MipLevels = 1;
-		HRESULT hr = device->CreateShaderResourceView(input, &src_desc, &src_srv);
+		HRESULT hr = device->CreateShaderResourceView(input, &src_desc, src_srv);
 
 		if (FAILED(hr))
 		{
 			return false;
 		}
 
-		ID3D11UnorderedAccessView* dest_uav;
+		com_ptr<ID3D11UnorderedAccessView> dest_uav;
 		D3D11_UNORDERED_ACCESS_VIEW_DESC dest_desc = {};
 		dest_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
 		dest_desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
 		dest_desc.Texture2D.MipSlice = 0;
-		hr = device->CreateUnorderedAccessView(target, &dest_desc, &dest_uav);
+		hr = device->CreateUnorderedAccessView(target, &dest_desc, dest_uav);
 
 		if (FAILED(hr))
 		{
-			src_srv->Release();
-
 			return false;
 		}
 
@@ -308,17 +261,12 @@ namespace
 			cb_desc.MiscFlags = 0;
 			cb_desc.StructureByteStride = 0;
 
-			hr = device->CreateBuffer(&cb_desc, nullptr, &render_const_buffer);
+			hr = device->CreateBuffer(&cb_desc, nullptr, render_const_buffer);
 
 			if (FAILED(hr))
-			{
-				src_srv->Release();
-				dest_uav->Release();
-
 				return false;
-			}
 
-			ctx->CSSetConstantBuffers(0, 1, &render_const_buffer);
+			ctx->CSSetConstantBuffers(0, 1, render_const_buffer);
 		}
 
 		D3D11_MAPPED_SUBRESOURCE mapped_cb;
@@ -327,19 +275,17 @@ namespace
 		ctx->Unmap(render_const_buffer, 0);
 
 		ctx->CSSetShader(render_cs, nullptr, 0);
-		ctx->CSSetShaderResources(0, 1, &src_srv);
-		ctx->CSSetUnorderedAccessViews(0, 1, &dest_uav, nullptr);
+		ctx->CSSetShaderResources(0, 1, src_srv);
+		ctx->CSSetUnorderedAccessViews(0, 1, dest_uav, nullptr);
 		ctx->Dispatch((desc.Width + 15) / 16, (desc.Height + 15) / 16, 1);
 
 		ctx->CSSetShader(nullptr, nullptr, 0);
 
-		src_srv->Release();
 		src_srv = nullptr;
-		ctx->CSSetShaderResources(0, 1, &src_srv);
+		ctx->CSSetShaderResources(0, 1, src_srv);
 
-		dest_uav->Release();
 		dest_uav = nullptr;
-		ctx->CSSetUnorderedAccessViews(0, 1, &dest_uav, nullptr);
+		ctx->CSSetUnorderedAccessViews(0, 1, dest_uav, nullptr);
 
 		return true;
 	}
@@ -352,7 +298,6 @@ namespace
 		{
 			if (virtual_desktop_tex)
 			{
-				virtual_desktop_tex->Release();
 				virtual_desktop_tex = nullptr;
 			}
 
@@ -377,7 +322,7 @@ namespace
 			desc.MiscFlags = 0;
 			desc.CPUAccessFlags = 0;
 
-			hr = device->CreateTexture2D(&desc, nullptr, &virtual_desktop_tex);
+			hr = device->CreateTexture2D(&desc, nullptr, virtual_desktop_tex);
 			if (FAILED(hr))
 			{
 				auto msg = std::format("failed to create virtual desktop texture: {:x}", hr);
@@ -420,7 +365,7 @@ namespace
 
 			render_cb_data.white_level = monitor->sdr_white_level();
 
-			auto* screenshot = monitor->take_screenshot();
+			auto screenshot = monitor->take_screenshot();
 			if (!render(screenshot, virtual_desktop_tex)) [[unlikely]]
 			{
 				auto name = monitor->name();
@@ -435,8 +380,8 @@ namespace
 		staging_desc.MiscFlags = 0;
 		staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
 
-		ID3D11Texture2D* staging_tex = nullptr;
-		hr = device->CreateTexture2D(&staging_desc, nullptr, &staging_tex);
+		com_ptr<ID3D11Texture2D> staging_tex;
+		hr = device->CreateTexture2D(&staging_desc, nullptr, staging_tex);
 		if (FAILED(hr))
 		{
 			auto msg = std::format("failed to create staging texture: {:x}", hr);
@@ -451,25 +396,23 @@ namespace
 		buffer.resize(staging_desc.Width * staging_desc.Height * 4);
 		std::memcpy(buffer.data(), mapped.pData, buffer.size());
 		ctx->Unmap(staging_tex, 0);
-
-		staging_tex->Release();
 	}
 
-	void* BitBlt_Original = nullptr;
-	BOOL WINAPI BitBltHook(HDC hdc, int x, int y, int cx, int cy, HDC hdcSrc, int x1, int y1, DWORD rop)
+	trampoline<decltype(BitBlt)> bitblt;
+	BOOL WINAPI bitblt_hook(HDC hdc, int x, int y, int cx, int cy, HDC hdcSrc, int x1, int y1, DWORD rop)
 	{
 		printf("bitblt called\n");
 
 		static bool inited = init_desktop_dup();
 
 		if (!inited)
-			return reinterpret_cast<decltype(BitBlt)*>(BitBlt_Original)(hdc, x, y, cx, cy, hdcSrc, x1, y1, rop);
+			return bitblt(hdc, x, y, cx, cy, hdcSrc, x1, y1, rop);
 
 		auto src_window = WindowFromDC(hdcSrc);
 		auto desktop_window = GetDesktopWindow();
 
 		if (src_window != desktop_window)
-			return reinterpret_cast<decltype(BitBlt)*>(BitBlt_Original)(hdc, x, y, cx, cy, hdcSrc, x1, y1, rop);
+			return bitblt(hdc, x, y, cx, cy, hdcSrc, x1, y1, rop);
 
 		std::vector<uint8_t> buffer;
 
@@ -480,19 +423,37 @@ namespace
 		catch (std::runtime_error e)
 		{
 			printf("failed to capture_frame, error: \n%s\n", e.what());
-			return reinterpret_cast<decltype(BitBlt)*>(BitBlt_Original)(hdc, x, y, cx, cy, hdcSrc, x1, y1, rop);
+			return bitblt(hdc, x, y, cx, cy, hdcSrc, x1, y1, rop);
 		}
 
 		HBITMAP map = CreateBitmap(cx, cy, 1, 32, buffer.data());
 		HDC src = CreateCompatibleDC(hdc);
 		SelectObject(src, map);
 
-		auto result = reinterpret_cast<decltype(BitBlt)*>(BitBlt_Original)(hdc, x, y, cx, cy, src, x1, y1, rop & ~CAPTUREBLT);
+		auto result = bitblt(hdc, x, y, cx, cy, src, x1, y1, rop & ~CAPTUREBLT);
 
 		DeleteDC(src);
 		DeleteObject(map);
 
 		return result;
+	}
+
+	void free_desktop_dup()
+	{
+		monitors.clear();
+
+		render_const_buffer = nullptr;
+		virtual_desktop_tex = nullptr;
+		render_cs = nullptr;
+		ctx = nullptr;
+		device = nullptr;
+	}
+
+	trampoline<void WINAPI(UINT)> exit_process;
+	void exit_process_hook(UINT code)
+	{
+		free_desktop_dup();
+		exit_process(code);
 	}
 
 #if _DEBUG
@@ -517,13 +478,9 @@ namespace
 #endif
 			LoadLibraryA("gdi32.dll");
 			MH_Initialize();
-			MH_CreateHookApi(L"gdi32.dll", "BitBlt", BitBltHook, &BitBlt_Original);
+			MH_CreateHookApi(L"gdi32.dll", "BitBlt", bitblt_hook, &bitblt);
+			MH_CreateHookApi(L"kernel32.dll", "ExitProcess", exit_process_hook, &exit_process);
 			MH_EnableHook(MH_ALL_HOOKS);
-		}
-
-		~hook_autoinit()
-		{
-			free_desktop_dup();
 		}
 	} hook;
 }

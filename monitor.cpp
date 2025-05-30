@@ -62,22 +62,18 @@ bool get_path_info(HMONITOR monitor, DISPLAYCONFIG_PATH_INFO* path_info)
 	return false;
 }
 
-monitor::monitor(IDXGIOutput6* output, ID3D11Device* device) :
-	output_(output), dup_(nullptr), device_(device), last_tex_(nullptr)
+monitor::monitor(com_ptr<IDXGIOutput6> output, com_ptr<ID3D11Device> device) :
+	output_(output), device_(device)
 {
 	memset(&desc_, 0, sizeof(DXGI_OUTPUT_DESC1));
 }
 
 monitor::~monitor()
 {
-	if (dup_)
-		dup_->Release();
-
-	if (output_)
-		output_->Release();
-
-	if (last_tex_)
-		last_tex_->Release();
+	last_tex_ = nullptr;
+	dup_ = nullptr;
+	output_ = nullptr;
+	device_ = nullptr;
 }
 
 std::string monitor::name()
@@ -148,23 +144,22 @@ float monitor::sdr_white_level() const
 	return white_level.SDRWhiteLevel * 80.0f / 1000.0f;
 }
 
-ID3D11Texture2D* monitor::take_screenshot()
+com_ptr<ID3D11Texture2D> monitor::take_screenshot()
 {
 	if (!dup_) recreate_output_duplication();
 
 	if (last_tex_)
 	{
-		last_tex_->Release();
 		last_tex_ = nullptr;
 	}
 
 	DXGI_OUTDUPL_FRAME_INFO frame_info{ 0 };
-	IDXGIResource* resource = nullptr;
+	com_ptr<IDXGIResource> resource;
 
 	HRESULT hr = S_OK;
 	while (!frame_info.LastPresentTime.QuadPart)
 	{
-		hr = dup_->AcquireNextFrame(0, &frame_info, &resource);
+		hr = dup_->AcquireNextFrame(0, &frame_info, resource);
 
 		if (hr == DXGI_ERROR_INVALID_CALL) [[likely]]
 		{
@@ -204,14 +199,11 @@ ID3D11Texture2D* monitor::take_screenshot()
 		}
 	}
 
-	ID3D11Texture2D* tex = nullptr;
-	hr = resource->QueryInterface(IID_PPV_ARGS(&tex));
+	com_ptr<ID3D11Texture2D> tex = resource.as<ID3D11Texture2D>();
 
-	resource->Release();
-
-	if (FAILED(hr))
+	if (!tex)
 	{
-		auto msg = std::format("failed to get texture from resource on monitor {}: {:x}", name(), hr);
+		auto msg = std::format("failed to get texture from resource on monitor {}", name());
 		throw std::runtime_error{ msg };
 	}
 
@@ -223,7 +215,6 @@ void monitor::recreate_output_duplication()
 {
 	if (dup_)
 	{
-		dup_->Release();
 		dup_ = nullptr;
 	}
 
@@ -233,7 +224,7 @@ void monitor::recreate_output_duplication()
 		DXGI_FORMAT_R16G16B16A16_FLOAT,
 	};
 
-	auto hr = output_->DuplicateOutput1(device_, 0, 2, formats, &dup_);
+	auto hr = output_->DuplicateOutput1(device_, 0, 2, formats, dup_);
 
 	if (FAILED(hr))
 	{

@@ -13,6 +13,9 @@
     <Filter Include="shaders">
       <UniqueIdentifier>{07afbb9f-cbe0-4b61-90ee-7b7ed578bc3e}</UniqueIdentifier>
     </Filter>
+    <Filter Include="utils">
+      <UniqueIdentifier>{cf4d56d8-61d6-48db-8e4b-35766c57ffb8}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <None Include="dllproxy\version.def">
@@ -73,6 +76,12 @@
     </ClInclude>
     <ClInclude Include="resource.h" />
     <ClInclude Include="monitor.hpp" />
+    <ClInclude Include="utils\com_ptr.hpp">
+      <Filter>utils</Filter>
+    </ClInclude>
+    <ClInclude Include="utils\trampoline.hpp">
+      <Filter>utils</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="resource.rc" />

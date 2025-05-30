@@ -195,6 +195,8 @@
     <ClInclude Include="deps\minhook\src\trampoline.h" />
     <ClInclude Include="monitor.hpp" />
     <ClInclude Include="resource.h" />
+    <ClInclude Include="utils\com_ptr.hpp" />
+    <ClInclude Include="utils\trampoline.hpp" />
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="tonemapper.hlsl">
