@@ -129,11 +129,11 @@ namespace
 				continue;
 			}
 
-			if (desc.AttachedToDesktop)
-			{
-				monitors.push_back(std::make_unique<monitor>(output6, device));
-				continue;
-			}
+			// if (desc.AttachedToDesktop)
+			// {
+			// 	monitors.push_back(std::make_unique<monitor>(output6, device));
+			// 	continue;
+			// }
 		}
 	}
 
@@ -341,8 +341,8 @@ namespace
 			const auto cos_r = std::cosf(rad);
 
 			/*
-			*      cos(¦È) -sin(¦È) Tx
-			* Mt = sin(¦È)  cos(¦È) Ty
+			*      cos(ï¿½ï¿½) -sin(ï¿½ï¿½) Tx
+			* Mt = sin(ï¿½ï¿½)  cos(ï¿½ï¿½) Ty
 			*      0       0      1
 			*/
 			render_cb_data.transform_matrix[0][0] = cos_r;
