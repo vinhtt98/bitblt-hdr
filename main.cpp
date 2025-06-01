@@ -394,7 +394,15 @@ namespace
 		ctx->Map(staging_tex, 0, D3D11_MAP_READ, 0, &mapped);
 
 		buffer.resize(staging_desc.Width * staging_desc.Height * 4);
-		std::memcpy(buffer.data(), mapped.pData, buffer.size());
+
+		for (size_t i = 0; i < staging_desc.Height; i++)
+		{
+			const auto* src = reinterpret_cast<uint8_t*>(mapped.pData) + mapped.RowPitch * i;
+			auto* dest = buffer.data() + (staging_desc.Width * 4 * i);
+
+			std::memcpy(dest, src, staging_desc.Width * 4);
+		}
+
 		ctx->Unmap(staging_tex, 0);
 	}
 
